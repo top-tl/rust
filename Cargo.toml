@@ -1,0 +1,20 @@
+[package]
+name = "toptl"
+version = "1.0.0"
+edition = "2021"
+authors = ["TOP.TL <support@top.tl>"]
+description = "Official Rust SDK for the TOP.TL Telegram directory API"
+license = "MIT"
+repository = "https://github.com/AnotherGenZ/toptl-sdks"
+homepage = "https://top.tl"
+documentation = "https://docs.rs/toptl"
+readme = "README.md"
+keywords = ["telegram", "top-tl", "bot", "directory", "api"]
+categories = ["api-bindings"]
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
