@@ -1,53 +1,55 @@
 # toptl
 
-[![Crates.io](https://img.shields.io/crates/v/toptl)](https://crates.io/crates/toptl)
-[![Docs.rs](https://docs.rs/toptl/badge.svg)](https://docs.rs/toptl)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/toptl.svg?color=3775a9)](https://crates.io/crates/toptl)
+[![docs.rs](https://img.shields.io/docsrs/toptl/latest?color=3776ab)](https://docs.rs/toptl)
+[![Downloads](https://img.shields.io/crates/d/toptl.svg?color=blue)](https://crates.io/crates/toptl)
+[![License](https://img.shields.io/crates/l/toptl.svg?color=green)](https://github.com/top-tl/rust/blob/main/LICENSE)
+[![TOP.TL](https://img.shields.io/badge/top.tl-developers-2ec4b6)](https://top.tl/developers)
 
-Official Rust SDK for the [TOP.TL](https://top.tl) Telegram directory API.
+The official Rust SDK for **[TOP.TL](https://top.tl)** — post bot stats, check votes, and manage vote webhooks from your Telegram bot.
 
-## Installation
-
-Add to your `Cargo.toml`:
+## Install
 
 ```toml
 [dependencies]
-toptl = "1"
+toptl = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+
+Requires Rust 1.70+.
 
 ## Quick start
 
+Get an API key at <https://top.tl/profile> → **API Keys**.
+
 ```rust
-use toptl::TopTL;
+use toptl::{StatsPayload, TopTL};
 
 #[tokio::main]
 async fn main() -> Result<(), toptl::Error> {
-    let client = TopTL::new("your-api-key");
+    let client = TopTL::new("toptl_xxx");
 
-    // Get listing info
-    let listing = client.get_listing("mybotusername").await?;
-    println!("{:?}", listing);
+    // Look up a listing.
+    let listing = client.get_listing("durov").await?;
+    println!("{} — {} votes", listing.title, listing.vote_count);
 
-    // Check if a user has voted
-    let result = client.has_voted("mybotusername", 123456789).await?;
-    println!("Voted: {}", result.voted);
+    // Post stats for a bot you own.
+    client
+        .post_stats(
+            "mybot",
+            &StatsPayload {
+                member_count: Some(5_000),
+                group_count: Some(1_200),
+                channel_count: Some(300),
+                bot_serves: None,
+            },
+        )
+        .await?;
 
-    // Get votes
-    let votes = client.get_votes("mybotusername").await?;
-    println!("Total votes: {:?}", votes.total);
-
-    // Post stats
-    use toptl::StatsPayload;
-    let stats = StatsPayload {
-        server_count: Some(100),
-        member_count: Some(5000),
-        shard_count: None,
-    };
-    client.post_stats("mybotusername", &stats).await?;
-
-    // Global stats
-    let global = client.get_global_stats().await?;
-    println!("{:?}", global);
+    // Reward users who voted.
+    if client.has_voted("mybot", 123_456_789u64).await?.voted {
+        // grant premium …
+    }
 
     Ok(())
 }
@@ -55,41 +57,83 @@ async fn main() -> Result<(), toptl::Error> {
 
 ## Autoposter
 
-Automatically post stats on a recurring interval:
+Long-running bot? Register an autoposter that flushes stats on an interval:
 
 ```rust
 use std::sync::Arc;
 use std::time::Duration;
-use toptl::{TopTL, StatsPayload};
-use toptl::autoposter::Autoposter;
+use toptl::{autoposter::Autoposter, StatsPayload, TopTL};
 
-#[tokio::main]
-async fn main() {
-    let client = TopTL::new("your-api-key");
+let client = TopTL::new("toptl_xxx");
+let autoposter = Autoposter::new(client, "mybot")
+    .interval(Duration::from_secs(30 * 60))
+    .callback(Arc::new(|| StatsPayload {
+        member_count: Some(current_user_count()),
+        ..StatsPayload::default()
+    }))
+    .start();
 
-    let autoposter = Autoposter::new(client, "mybotusername")
-        .interval(Duration::from_secs(900)) // every 15 minutes
-        .callback(Arc::new(|| StatsPayload {
-            server_count: Some(1234),
-            member_count: Some(56789),
-            shard_count: None,
-        }))
-        .start();
-
-    // Runs in the background. Call autoposter.stop().await to stop.
-}
+// autoposter.stop().await; on shutdown
 ```
 
-## Builder pattern
+## Webhooks
 
 ```rust
-use toptl::TopTL;
+use toptl::WebhookConfig;
 
-let client = TopTL::builder("your-api-key")
-    .base_url("https://top.tl/api/v1") // default
-    .build();
+client
+    .set_webhook(
+        "mybot",
+        &WebhookConfig {
+            url: "https://mybot.example.com/toptl-vote".into(),
+            reward_title: Some("30-day premium".into()),
+        },
+    )
+    .await?;
+
+let result = client.test_webhook("mybot").await?;
+assert!(result.success);
+```
+
+## Batch stats
+
+Up to 25 listings per request:
+
+```rust
+use toptl::BatchStatsItem;
+
+client
+    .batch_post_stats(&[
+        BatchStatsItem {
+            username: "bot1".into(),
+            member_count: Some(1_200),
+            ..Default::default()
+        },
+        BatchStatsItem {
+            username: "bot2".into(),
+            member_count: Some(5_400),
+            ..Default::default()
+        },
+    ])
+    .await?;
+```
+
+## Error handling
+
+All methods return `Result<T, toptl::Error>`:
+
+```rust
+use toptl::Error;
+
+match client.post_stats("mybot", &stats).await {
+    Ok(_) => {}
+    Err(Error::Api { status: 401, .. }) => { /* bad key */ }
+    Err(Error::Api { status: 404, .. }) => { /* no such listing */ }
+    Err(Error::Api { status: 429, .. }) => { /* back off */ }
+    Err(e) => eprintln!("transport: {e}"),
+}
 ```
 
 ## License
 
-MIT - see [LICENSE](LICENSE) for details.
+MIT — see [`LICENSE`](LICENSE).

@@ -1,5 +1,3 @@
-use std::fmt;
-
 /// Errors that can occur when interacting with the TOP.TL API.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -1,25 +1,17 @@
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
+use reqwest::{Client, Method};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::types::*;
 
-const DEFAULT_BASE_URL: &str = "https://top.tl/api/v1";
+/// Default base URL — the `/api` prefix is included so per-method paths
+/// only need to supply `/v1/...`.
+const DEFAULT_BASE_URL: &str = "https://top.tl/api";
+const DEFAULT_USER_AGENT: &str = concat!("toptl-rust/", env!("CARGO_PKG_VERSION"));
 
-/// The main client for interacting with the TOP.TL API.
-///
-/// # Examples
-///
-/// ```no_run
-/// use toptl::TopTL;
-///
-/// #[tokio::main]
-/// async fn main() {
-///     let client = TopTL::new("your-api-key");
-///     let listing = client.get_listing("mybotusername").await.unwrap();
-///     println!("{:?}", listing);
-/// }
-/// ```
+/// Async client for the TOP.TL public API.
 #[derive(Debug, Clone)]
 pub struct TopTL {
     http: Client,
@@ -27,79 +19,157 @@ pub struct TopTL {
 }
 
 impl TopTL {
-    /// Create a new TOP.TL client with the given API key.
+    /// Create a client with the given API key. See [`TopTLBuilder`] for
+    /// base-URL / timeout overrides.
     pub fn new(api_key: impl Into<String>) -> Self {
         TopTLBuilder::new(api_key).build()
     }
 
-    /// Returns a [`TopTLBuilder`] for advanced configuration.
     pub fn builder(api_key: impl Into<String>) -> TopTLBuilder {
         TopTLBuilder::new(api_key)
     }
 
-    /// Get information about a listing by its username.
+    // ---- Listings ------------------------------------------------------
+
     pub async fn get_listing(&self, username: &str) -> Result<Listing> {
-        let url = format!("{}/listing/{}", self.base_url, username);
-        self.get(&url).await
+        self.request(Method::GET, &format!("/v1/listing/{username}"), None::<&()>)
+            .await
     }
 
-    /// Get votes for a listing.
-    pub async fn get_votes(&self, username: &str) -> Result<VotesResponse> {
-        let url = format!("{}/listing/{}/votes", self.base_url, username);
-        self.get(&url).await
+    /// Recent voters for a listing. `limit` defaults server-side to 20 if
+    /// `None` is passed.
+    pub async fn get_votes(&self, username: &str, limit: Option<u32>) -> Result<Vec<Voter>> {
+        let mut path = format!("/v1/listing/{username}/votes");
+        if let Some(n) = limit {
+            path.push_str(&format!("?limit={n}"));
+        }
+        // The server returns either a bare array or `{items: [...]}` depending
+        // on version; accept both shapes.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum VotesBody {
+            List(Vec<Voter>),
+            Wrapped { items: Vec<Voter> },
+        }
+        let body: VotesBody = self
+            .request(Method::GET, &path, None::<&()>)
+            .await?;
+        Ok(match body {
+            VotesBody::List(v) => v,
+            VotesBody::Wrapped { items } => items,
+        })
     }
 
-    /// Check whether a specific Telegram user has voted for a listing.
-    pub async fn has_voted(&self, username: &str, user_id: u64) -> Result<HasVotedResponse> {
-        let url = format!(
-            "{}/listing/{}/has-voted/{}",
-            self.base_url, username, user_id
-        );
-        self.get(&url).await
+    pub async fn has_voted(
+        &self,
+        username: &str,
+        user_id: impl Into<UserId>,
+    ) -> Result<VoteCheck> {
+        let user_id = user_id.into();
+        self.request(
+            Method::GET,
+            &format!("/v1/listing/{username}/has-voted/{user_id}"),
+            None::<&()>,
+        )
+        .await
     }
 
-    /// Post stats (server count, member count, etc.) for a listing.
+    // ---- Stats ---------------------------------------------------------
+
     pub async fn post_stats(
         &self,
         username: &str,
         stats: &StatsPayload,
-    ) -> Result<StatsPostResponse> {
-        let url = format!("{}/listing/{}/stats", self.base_url, username);
-        let response = self
-            .http
-            .post(&url)
-            .json(stats)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Api { status, message });
-        }
-
-        let body = response.text().await?;
-        serde_json::from_str(&body).map_err(Error::from)
+    ) -> Result<StatsResult> {
+        self.request(
+            Method::POST,
+            &format!("/v1/listing/{username}/stats"),
+            Some(stats),
+        )
+        .await
     }
 
-    /// Get global TOP.TL platform statistics.
+    /// Post stats for up to 25 listings in one call.
+    pub async fn batch_post_stats(
+        &self,
+        items: &[BatchStatsItem],
+    ) -> Result<Vec<StatsResult>> {
+        self.request(Method::POST, "/v1/stats/batch", Some(items)).await
+    }
+
     pub async fn get_global_stats(&self) -> Result<GlobalStats> {
-        let url = format!("{}/stats", self.base_url);
-        self.get(&url).await
+        self.request(Method::GET, "/v1/stats", None::<&()>).await
     }
 
-    /// Internal helper for GET requests.
-    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let response = self.http.get(url).send().await?;
+    // ---- Webhooks ------------------------------------------------------
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Api { status, message });
+    pub async fn set_webhook(&self, username: &str, config: &WebhookConfig) -> Result<WebhookConfig> {
+        self.request(
+            Method::PUT,
+            &format!("/v1/listing/{username}/webhook"),
+            Some(config),
+        )
+        .await
+    }
+
+    pub async fn test_webhook(&self, username: &str) -> Result<WebhookTestResult> {
+        self.request(
+            Method::POST,
+            &format!("/v1/listing/{username}/webhook/test"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    // ---- Internal ------------------------------------------------------
+
+    async fn request<B, T>(&self, method: Method, path: &str, body: Option<&B>) -> Result<T>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self.http.request(method, &url);
+        if let Some(b) = body {
+            req = req.json(b);
         }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            // Prefer server's error message when it's JSON with a `message` key.
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned))
+                .unwrap_or(text);
+            return Err(Error::Api {
+                status: status.as_u16(),
+                message,
+            });
+        }
+        serde_json::from_str(&text).map_err(Error::from)
+    }
+}
 
-        let body = response.text().await?;
-        serde_json::from_str(&body).map_err(Error::from)
+/// Small wrapper so `has_voted` accepts both numeric Telegram IDs and
+/// pre-stringified values.
+pub struct UserId(String);
+
+impl From<u64> for UserId {
+    fn from(v: u64) -> Self { UserId(v.to_string()) }
+}
+impl From<i64> for UserId {
+    fn from(v: i64) -> Self { UserId(v.to_string()) }
+}
+impl From<&str> for UserId {
+    fn from(v: &str) -> Self { UserId(v.to_owned()) }
+}
+impl From<String> for UserId {
+    fn from(v: String) -> Self { UserId(v) }
+}
+impl std::fmt::Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -107,31 +177,42 @@ impl TopTL {
 pub struct TopTLBuilder {
     api_key: String,
     base_url: String,
+    user_agent: Option<String>,
 }
 
 impl TopTLBuilder {
-    /// Create a new builder with the given API key.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
+            base_url: DEFAULT_BASE_URL.to_owned(),
+            user_agent: None,
         }
     }
 
-    /// Override the base URL (useful for testing).
+    /// Override the base URL (useful for staging / self-hosted).
     pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
+        self.base_url = url.into().trim_end_matches('/').to_owned();
         self
     }
 
-    /// Build the [`TopTL`] client.
+    /// Append a custom user-agent suffix (e.g. `"mybot/1.0"`).
+    pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
+        self.user_agent = Some(ua.into());
+        self
+    }
+
     pub fn build(self) -> TopTL {
         let mut headers = HeaderMap::new();
-        let auth_value = format!("Bearer {}", self.api_key);
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&auth_value).expect("Invalid API key characters"),
+            HeaderValue::from_str(&format!("Bearer {}", self.api_key))
+                .expect("Invalid API key characters"),
         );
+        let ua = match self.user_agent {
+            Some(suffix) => format!("{DEFAULT_USER_AGENT} {suffix}"),
+            None => DEFAULT_USER_AGENT.to_owned(),
+        };
+        headers.insert(USER_AGENT, HeaderValue::from_str(&ua).expect("bad UA"));
 
         let http = Client::builder()
             .default_headers(headers)

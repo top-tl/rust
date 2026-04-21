@@ -6,36 +6,34 @@ use tokio::time::{self, Duration};
 use crate::client::TopTL;
 use crate::types::StatsPayload;
 
-/// A callback that returns the current stats to post.
-///
-/// The callback is invoked on each interval tick to fetch fresh stats
-/// before posting them to the API.
+/// Callback that produces the current stats to post. Invoked on every
+/// autoposter tick.
 pub type StatsCallback = Arc<dyn Fn() -> StatsPayload + Send + Sync>;
 
-/// Automatically posts stats to the TOP.TL API on a recurring interval.
+/// Background task that calls [`TopTL::post_stats`] on an interval.
 ///
-/// # Examples
+/// # Example
 ///
 /// ```no_run
 /// use std::sync::Arc;
 /// use std::time::Duration;
-/// use toptl::{TopTL, StatsPayload};
+/// use toptl::{StatsPayload, TopTL};
 /// use toptl::autoposter::Autoposter;
 ///
 /// #[tokio::main]
 /// async fn main() {
-///     let client = TopTL::new("your-api-key");
+///     let client = TopTL::new("toptl_xxx");
 ///
-///     let autoposter = Autoposter::new(client, "mybotusername")
-///         .interval(Duration::from_secs(900))
+///     let autoposter = Autoposter::new(client, "mybot")
+///         .interval(Duration::from_secs(30 * 60))
 ///         .callback(Arc::new(|| StatsPayload {
-///             server_count: Some(1234),
-///             member_count: Some(56789),
-///             shard_count: None,
+///             member_count: Some(5_000),
+///             group_count: Some(1_200),
+///             channel_count: Some(300),
+///             bot_serves: None,
 ///         }))
 ///         .start();
 ///
-///     // The autoposter runs in the background until stopped.
 ///     // autoposter.stop().await;
 /// }
 /// ```
@@ -49,35 +47,28 @@ pub struct Autoposter {
 }
 
 impl Autoposter {
-    /// Create a new autoposter for the given listing.
     pub fn new(client: TopTL, username: impl Into<String>) -> Self {
         Self {
             client,
             username: username.into(),
-            interval: Duration::from_secs(1800), // 30 minutes default
+            interval: Duration::from_secs(1800), // 30 min
             callback: None,
             handle: None,
             running: Arc::new(Mutex::new(false)),
         }
     }
 
-    /// Set the posting interval. Default is 30 minutes.
     pub fn interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
 
-    /// Set the callback that provides stats on each tick.
     pub fn callback(mut self, cb: StatsCallback) -> Self {
         self.callback = Some(cb);
         self
     }
 
-    /// Start the autoposter background task. Returns `self` for chaining.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no callback has been set.
+    /// Start the background task. Panics if no callback is set.
     pub fn start(mut self) -> Self {
         let callback = self
             .callback
@@ -92,22 +83,17 @@ impl Autoposter {
         let handle = tokio::spawn(async move {
             *running.lock().await = true;
             let mut ticker = time::interval(interval);
-
             loop {
                 ticker.tick().await;
-
                 if !*running.lock().await {
                     break;
                 }
-
                 let stats = (callback)();
-                match client.post_stats(&username, &stats).await {
-                    Ok(_) => {
-                        // Stats posted successfully.
-                    }
-                    Err(e) => {
-                        eprintln!("[toptl::autoposter] Failed to post stats: {e}");
-                    }
+                if let Err(e) = client.post_stats(&username, &stats).await {
+                    // Keep going — transient errors (network, 5xx) shouldn't
+                    // kill the loop. Consumers can log their own way via the
+                    // `log` / `tracing` crate by wrapping post_stats themselves.
+                    eprintln!("[toptl::autoposter] post_stats failed: {e}");
                 }
             }
         });
@@ -116,7 +102,6 @@ impl Autoposter {
         self
     }
 
-    /// Stop the autoposter gracefully.
     pub async fn stop(self) {
         *self.running.lock().await = false;
         if let Some(handle) = self.handle {

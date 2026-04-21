@@ -1,99 +1,140 @@
 use serde::{Deserialize, Serialize};
 
-/// Information about a listing on TOP.TL.
+/// A TOP.TL listing (channel, group, or bot). Field names mirror the
+/// JSON the API returns; anything unknown is tolerated via `#[serde(default)]`
+/// so the crate keeps compiling when the server adds new keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Listing {
-    /// The unique username of the listing.
+    pub id: String,
     pub username: String,
-    /// Display name.
     #[serde(default)]
-    pub name: Option<String>,
-    /// Short description.
+    pub title: String,
     #[serde(default)]
     pub description: Option<String>,
-    /// Category the listing belongs to.
+    /// `"CHANNEL" | "GROUP" | "BOT"`.
+    pub r#type: String,
     #[serde(default)]
-    pub category: Option<String>,
-    /// Total number of votes.
+    pub member_count: u64,
     #[serde(default)]
-    pub votes: Option<u64>,
-    /// Number of members / subscribers.
+    pub vote_count: u64,
     #[serde(default)]
-    pub members: Option<u64>,
-    /// Avatar / photo URL.
+    pub languages: Vec<String>,
     #[serde(default)]
-    pub avatar: Option<String>,
-    /// Whether the listing is verified.
+    pub verified: bool,
     #[serde(default)]
-    pub verified: Option<bool>,
-    /// Tags associated with this listing.
+    pub featured: bool,
     #[serde(default)]
-    pub tags: Option<Vec<String>>,
+    pub photo_url: Option<String>,
+    /// Additional tags associated with the listing.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
-/// A single vote record.
+/// One voter record returned by `get_votes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Vote {
-    /// The Telegram user ID of the voter.
-    #[serde(alias = "userId")]
-    pub user_id: Option<u64>,
-    /// Timestamp of when the vote was cast (ISO 8601 or epoch).
+#[serde(rename_all = "camelCase")]
+pub struct Voter {
     #[serde(default)]
-    pub timestamp: Option<String>,
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default, alias = "createdAt")]
+    pub voted_at: Option<String>,
 }
 
-/// Response when fetching votes for a listing.
+/// Response for `has_voted`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VotesResponse {
-    /// The list of votes.
-    pub votes: Vec<Vote>,
-    /// Total number of votes.
-    #[serde(default)]
-    pub total: Option<u64>,
-}
-
-/// Response when checking if a user has voted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HasVotedResponse {
-    /// Whether the user has voted.
+#[serde(rename_all = "camelCase")]
+pub struct VoteCheck {
+    #[serde(default, alias = "hasVoted")]
     pub voted: bool,
+    #[serde(default)]
+    pub voted_at: Option<String>,
 }
 
-/// Payload for posting stats to a listing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Payload for `post_stats`. All fields are optional — the server only
+/// updates the ones you send, so you can push a member-count-only
+/// update without zeroing out group/channel counts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StatsPayload {
-    /// Server / group count.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_count: Option<u64>,
-    /// Member count.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_count: Option<u64>,
-    /// Shard count.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard_count: Option<u32>,
+    pub group_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_count: Option<u64>,
+    /// For bots that operate inside specific groups/channels, a list of
+    /// their usernames.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bot_serves: Option<Vec<String>>,
 }
 
-/// Response after posting stats.
+/// Response for `post_stats` / `batch_post_stats` items.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatsPostResponse {
-    /// Whether the stats were accepted.
+#[serde(rename_all = "camelCase")]
+pub struct StatsResult {
+    #[serde(default = "default_true")]
+    pub success: bool,
     #[serde(default)]
-    pub success: Option<bool>,
-    /// Optional message from the API.
+    pub username: Option<String>,
     #[serde(default)]
+    pub error: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One entry in a `batch_post_stats` request.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStatsItem {
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bot_serves: Option<Vec<String>>,
+}
+
+/// Body for `set_webhook`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookConfig {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_title: Option<String>,
+}
+
+/// Response from `test_webhook`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookTestResult {
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default, alias = "status")]
+    pub status_code: Option<u16>,
+    #[serde(default, alias = "error")]
     pub message: Option<String>,
 }
 
-/// Global platform statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Site-wide totals from `get_global_stats`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GlobalStats {
-    /// Total number of listings.
     #[serde(default)]
-    pub total_listings: Option<u64>,
-    /// Total number of votes across the platform.
+    pub total: u64,
     #[serde(default)]
-    pub total_votes: Option<u64>,
-    /// Total number of registered users.
+    pub channels: u64,
     #[serde(default)]
-    pub total_users: Option<u64>,
+    pub groups: u64,
+    #[serde(default)]
+    pub bots: u64,
 }
